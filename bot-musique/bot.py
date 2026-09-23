@@ -2,6 +2,7 @@
 Bot Discord musical (YouTube / YouTube Music / Spotify / Deezer) - tout le code est dans ce fichier.
 
     /musique url:<lien>   ajoute une playlist, un album ou une piste à la file d'attente
+    /search nom:<texte>   cherche un morceau par son nom et joue le résultat le plus probable
     /mp3 fichier:<pièce jointe> | nom:<bibliothèque>   joue un fichier MP3
     /dash                 tableau de bord (embeds + boutons) : lecture, file d'attente, stats
     /clear                supprime les messages du bot dans le salon (ou le MP) courant
@@ -373,6 +374,15 @@ def _search_youtube_blocking(query: str, expected_duration: int | None) -> str:
     if url is None:
         raise RuntimeError(f"Aucun résultat YouTube pour « {query} »")
     return url
+
+
+def search_track_blocking(query: str, requested_by: str) -> Track:
+    """Cherche le morceau YouTube le plus probable pour une requête libre (« artiste - titre », etc.)."""
+    video_url = _search_youtube_blocking(query, expected_duration=None)
+    tracks, _skipped = load_tracks_blocking(video_url, requested_by)
+    if not tracks:
+        raise RuntimeError(f"Aucun résultat lisible pour « {query} »")
+    return tracks[0]
 
 
 def _extract_stream_blocking(url: str) -> tuple[str, dict]:
@@ -1199,6 +1209,7 @@ class MusicBot(discord.Client):
         text = (
             "👋 Salut ! Je suis un bot musique. Ici, en message privé, tu peux utiliser :\n"
             "• `/musique` : lien YouTube / YouTube Music / Spotify / Deezer\n"
+            "• `/search` : nom d'un morceau (artiste, titre...)\n"
             "• `/mp3` : un fichier audio (joins-le à la commande)\n"
             "• `/dash` : tableau de bord avec boutons (pause, suivant, stop…)\n\n"
             f"Je joue dans le salon vocal où tu te trouves.\n{status}"
@@ -1449,6 +1460,45 @@ async def _drop_if_unused(player: GuildPlayer) -> None:
     """Après un échec de connexion, ne garde pas un lecteur vide en mémoire."""
     if player.current is None and not player.queue and player.voice_client is None:
         await player.cleanup("connexion vocale échouée")
+
+
+@bot.tree.command(name="search", description="Cherche un morceau par son nom (artiste, titre...) et joue le résultat le plus probable")
+@app_commands.describe(nom="Nom du morceau à chercher, par exemple « artiste - titre »")
+async def search(interaction: discord.Interaction, nom: str):
+    log.info("Commande /search reçue (serveur %s, par %s)", interaction.guild_id or "MP", interaction.user)
+    member = interaction.user
+
+    nom = nom.strip()
+    if not nom:
+        return await reject(interaction, "❌ Donne le nom d'un morceau à chercher.")
+
+    channel = await check_voice_access(interaction)
+    if channel is None:
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    try:
+        track = await asyncio.wait_for(
+            asyncio.to_thread(search_track_blocking, nom, member.display_name), LOAD_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        log.error("Recherche : délai dépassé pour « %s »", nom)
+        return await interaction.followup.send("⏱️ La recherche met trop de temps à répondre. Réessaie dans un instant.")
+    except yt_dlp.utils.YoutubeDLError as exc:
+        log.error("Erreur yt-dlp (recherche) : %s", exc)
+        return await interaction.followup.send(describe_ytdlp_error(exc))
+    except Exception as exc:
+        log.warning("Recherche impossible pour « %s » : %s", nom, exc)
+        return await interaction.followup.send(f"❌ Aucun résultat trouvé pour « {clean_title(nom, 80)} ».")
+
+    already_busy = await enqueue_tracks(interaction, channel, [track])
+    if already_busy is None:
+        return
+
+    tail = "à la suite de la file d'attente" if already_busy else "à la file d'attente"
+    label = f"[{clean_title(track.title, 80)}]({track.url})" if track.url else clean_title(track.title, 80)
+    await interaction.followup.send(f"🔎 **{label}** ajouté {tail}.")
 
 
 @bot.tree.command(name="skip", description="Passe au morceau suivant")
