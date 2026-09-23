@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BOT_FOLDERS = [
     ROOT / "annonce",
+    ROOT / "bot-musique",
     ROOT / "Sondage",
     ROOT / "Ticket",
 ]
